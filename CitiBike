@@ -1,3 +1,6 @@
+#FIND TRIP DURATION USING CITIBIKE DATA
+
+
 library(dplyr)
 library(xgboost)
 library(tidyverse)
