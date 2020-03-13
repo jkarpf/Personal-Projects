@@ -1,0 +1,395 @@
+library(dplyr)
+library(caret)
+library(xgboost)
+library(Matrix)
+library(ROCR)
+library(rsq)
+library(SparseM)
+library(data.table)
+library(MatrixModels)
+library(glmnet)
+library(caTools)
+library(splitstackshape)
+library(rpart)
+library(BBmisc)
+library(dummies)
+library(randomForest)
+library(rfUtilities)
+library(MASS)
+
+
+
+
+# Approved:
+#   Application approved but not accepted
+# Loan originated
+# 
+# Denied:
+#   Application denied by financial institution 
+
+data1 <- hmda_lar_1_ %>% filter(action_taken_name == "Application approved but not accepted" | 
+                                  action_taken_name == "Loan originated" | 
+                                  action_taken_name == "Application denied by financial institution")
+
+data1 <- data1 %>% filter(state_name == "New York") %>% filter(as_of_year == 2017)
+
+#laws that financial institutions cannot discriminate giving a loan or mortgage
+#based on race, ethnicity, or gender
+#even though they are typically good indicators in a model
+data1$applicant_race_name_1 <- NULL
+data1$applicant_race_name_2 <- NULL
+data1$applicant_race_name_3 <- NULL
+data1$applicant_race_name_4 <- NULL
+data1$applicant_race_name_5 <- NULL
+data1$applicant_ethnicity_name <- NULL
+data1$applicant_sex_name <- NULL
+
+
+
+
+#create a field if there is a co-applicant 
+data1$co_applicant <- ifelse(is.na(data1$co_applicant_sex_name), 0, data1$co_applicant_sex_name)
+data1$co_applicant <- ifelse(data1$co_applicant_sex_name == "No co-applicant" | data1$co_applicant_sex_name == "Not applicable", 0, 1)
+
+
+data1$co_applicant_ethnicity_name <- NULL
+data1$co_applicant_race_name_1 <- NULL
+data1$co_applicant_race_name_2 <- NULL
+data1$co_applicant_race_name_3 <- NULL
+data1$co_applicant_race_name_4 <- NULL
+data1$co_applicant_race_name_5 <- NULL
+data1$co_applicant_sex_name <- NULL
+
+
+#denial reasons won't be a good indicator of whether a loan will be approved or denied, only explains why after
+data1$denial_reason_name_1 <- NULL
+data1$denial_reason_name_2 <- NULL
+data1$denial_reason_name_3 <- NULL
+
+#removing abbr columns when also have full name (redundant information)
+data1$state_abbr <- NULL
+data1$agency_abbr <- NULL
+
+#mostly NA's
+data1$rate_spread <- NULL
+data1$edit_status_name <- NULL
+
+#unique identifier won't help 
+data1$sequence_number <- NULL
+data1$census_tract_number <- NULL
+
+#can capture most of data in counties and states, field is redundant
+data1$msamd_name <- NULL
+
+#not informative field/too many NAs
+data1$application_date_indicator <- NULL
+
+data1$applicant_income_000s <- ifelse(is.na(data1$applicant_income_000s), 0, data1$applicant_income_000s)
+data1$income_000s <- ifelse(data1$applicant_income_000s == 0, 1, 0)
+
+#test <- dummy(data1$income_000s)
+
+
+dummy_data <- data1
+
+#don't need state info now just NY
+dummy_data$state_name <- NULL
+
+property_types <- dummy(dummy_data$property_type_name)
+loan_purpose <- dummy(dummy_data$loan_purpose_name)
+loan_type <- dummy(dummy_data$loan_type_name)
+purchaser_type <- dummy(dummy_data$purchaser_type_name)
+preapproval <- dummy(dummy_data$preapproval_name)
+owner_occupancy <- dummy(dummy_data$owner_occupancy_name)
+lien_status <- dummy(dummy_data$lien_status_name)
+hoepa_status <- dummy(dummy_data$hoepa_status_name)
+#year <- dummy(dummy_data$as_of_year)
+agency <- dummy(dummy_data$agency_name)
+
+all_dummy_vars <- cbind(property_types, loan_purpose, loan_type, purchaser_type,
+                        preapproval, owner_occupancy, lien_status, hoepa_status,
+                        agency)
+
+
+cont_vars <- dummy_data
+cont_vars$state_name <- NULL
+cont_vars$property_type_name <- NULL
+cont_vars$loan_purpose_name <- NULL
+cont_vars$loan_type_name <- NULL
+cont_vars$purchaser_type_name <- NULL
+cont_vars$preapproval_name <- NULL
+cont_vars$owner_occupancy_name <- NULL
+cont_vars$lien_status_name <- NULL
+cont_vars$hoepa_status_name <- NULL
+cont_vars$as_of_year <- NULL
+cont_vars$agency_name <- NULL
+cont_vars$respondent_id <- NULL
+cont_vars$county_name <- NULL
+
+
+cont_vars$tract_to_msamd_income <- normalize(cont_vars$tract_to_msamd_income, method = "range", range = c(0, 1))
+cont_vars$population <- normalize(cont_vars$population, method = "range", range = c(0, 1))
+cont_vars$minority_population <- normalize(cont_vars$minority_population, method = "range", range = c(0, 1))
+cont_vars$number_of_owner_occupied_units <- normalize(cont_vars$number_of_owner_occupied_units, method = "range", range = c(0, 1))
+cont_vars$number_of_1_to_4_family_units <- normalize(cont_vars$number_of_1_to_4_family_units, method = "range", range = c(0, 1))
+cont_vars$loan_amount_000s <- normalize(cont_vars$loan_amount_000s, method = "range", range = c(0, 1))
+cont_vars$hud_median_family_income <- normalize(cont_vars$hud_median_family_income, method = "range", range = c(0, 1))
+cont_vars$applicant_income_000s <- normalize(cont_vars$applicant_income_000s, method = "range", range = c(0, 1))
+
+
+all_vars <- cbind(all_dummy_vars, cont_vars)
+
+
+#make response variable into 0s and 1s
+#1 is approved and 0 is denied
+all_vars$action_taken_name <- ifelse(all_vars$action_taken_name == "Application approved but not accepted", 1, all_vars$action_taken_name)
+all_vars$action_taken_name <- ifelse(all_vars$action_taken_name == "Loan originated", 1, all_vars$action_taken_name)
+all_vars$action_taken_name <- ifelse(all_vars$action_taken_name == "Application denied by financial institution", 0, all_vars$action_taken_name)
+
+all_vars$action_taken_name <- as.numeric(all_vars$action_taken_name)
+
+# set.seed(100) #can provide any number for seed
+# nall = nrow(all_vars) #total number of rows in data
+# ntrain = floor(0.75 * nall) # number of rows for train,75%
+# ntest = floor(0.25* nall) # number of rows for test, 25%
+# index = seq(1:nall)
+# trainIndex = sample(index, ntrain) #train data set
+# testIndex = index[-trainIndex]
+
+
+all_vars <- all_vars[complete.cases(all_vars), ]
+
+set.seed(88)
+split <- sample.split(all_vars$action_taken_name, SplitRatio = 0.75)
+
+train2 <- subset(all_vars, split == TRUE)
+test2 <- subset(all_vars, split == FALSE)
+
+
+model.glm <- glm(action_taken_name ~ ., data = train2, family = binomial)
+summary(model)
+predict <- predict(model, type = 'response')
+
+
+
+table(test2$action_taken_name, predict > 0.5)
+
+
+#stepwise_vars <- stepAIC(model.glm, direction = "both")
+
+#rsquared is 0.82
+
+# ROCRpred <- prediction(predict, train2$action_taken_name)
+# ROCRperf <- performance(ROCRpred, 'tpr','fpr')
+# plot(ROCRperf, colorize = TRUE, text.adj = c(-0.2,1.7))
+
+#######################################################################
+#DECISION TREE
+
+
+fit <- rpart(action_taken_name ~ .,
+             method="class", data=train2)
+
+# 
+# printcp(fit) # display the results
+# plotcp(fit) # visualize cross-validation results
+# summary(fit) # detailed summary of splits
+
+predictions <- predict(fit, test2, type="class")
+confMat <- table(test2$action_taken_name, predictions)
+accuracy <- sum(diag(confMat))/sum(confMat)
+accuracy
+
+#accuracy is sum of diagonals
+
+######################################
+#Random Forest
+train3 <- train2
+test3 <- test2
+
+names(train3) <- make.names(names(train3))
+names(test3) <- make.names(names(test3))
+
+train3$action_taken_name <- as.factor(train3$action_taken_name)
+test3$action_taken_name <- as.factor(test3$action_taken_name)
+
+
+rf <- randomForest(action_taken_name~., data=train3, ntree=20, importance=T)
+rf.predict <- predict(rf, test3, type="class")
+
+rf.confmat <- confusionMatrix(rf.predict, test3$action_taken_name)
+rf.confmat
+
+#rf.cv <- rf.crossValidation(rf, train3, p = 0.2, n = 5)
+
+important_vars <- data.frame(importance(rf))
+
+plot(rf)
+# for classification, black solid line for overall OOB error and a bunch of colour lines, 
+# one for each class' error (i.e. 1-this class recall).
+
+layout(matrix(c(1,2),nrow=1),
+       width=c(4,1)) 
+par(mar=c(5,4,4,0)) #No margin on the right side
+plot(rf, log="y")
+par(mar=c(5,0,4,2)) #No margin on the left side
+plot(c(0,1),type="n", axes=F, xlab="", ylab="")
+legend("top", colnames(rf$err.rate),col=1:4,cex=0.8,fill=1:4)
+
+
+#good at predicting 1's not good at predicting 0's make sense because of data imbalance
+#resplit training
+
+train.index <- createDataPartition(all_vars$action_taken_name, p = .75, list = FALSE)
+strat_train <- all_vars[ train.index,]
+strat_test  <- all_vars[-train.index,]
+
+
+names(strat_train) <- make.names(names(strat_train))
+names(strat_test) <- make.names(names(strat_test))
+
+strat_train$action_taken_name <- as.factor(strat_train$action_taken_name)
+strat_test$action_taken_name <- as.factor(strat_test$action_taken_name)
+
+
+rf2 <- randomForest(action_taken_name~., data=strat_train, ntree=20, importance=T)
+rf.predict2 <- predict(rf2, strat_test, type="class")
+
+rf.confmat2 <- confusionMatrix(rf.predict2, strat_test$action_taken_name)
+rf.confmat2
+
+plot(rf2)
+# for classification, black solid line for overall OOB error and a bunch of colour lines, 
+# one for each class' error (i.e. 1-this class recall).
+
+layout(matrix(c(1,2),nrow=1),
+       width=c(4,1)) 
+par(mar=c(5,4,4,0)) #No margin on the right side
+plot(rf2, log="y")
+par(mar=c(5,0,4,2)) #No margin on the left side
+plot(c(0,1),type="n", axes=F, xlab="", ylab="")
+legend("top", colnames(rf2$err.rate),col=1:4,cex=0.8,fill=1:4)
+
+
+# View(varImp(rf2))
+# View(varImp(rf2, conditional=T)) #adjusts for correlations between predicts
+# View(varImpAUC(rf2))
+
+#multicolinearity
+check_cors <- data.frame(cor(all_vars))
+#check_cors <- sapply(check_cors, function(x) ifelse (abs(x) >=0.6,x,"NA"))
+check_cors2 <- apply(check_cors, 2, function(x) ifelse (abs(x) >=0.6,x,"NA"))
+
+
+for (i in 1:nrow(check_cors)) {
+  findrows <- which(abs(check_cors[i, ]) > 0.7  & check_cors[i, ] < 1)
+  if (length(findrows) > 0) {
+    message("rows:")
+    print(rownames(check_cors[i, , drop = FALSE]))
+    message("columns:")
+    print(colnames(check_cors[, findrows, drop = FALSE]))
+
+  }
+}
+
+
+
+
+
+#find best mtry
+mtry <- tuneRF(all_vars[-1],all_vars$action_taken_name, ntreeTry=20,
+               stepFactor=1.5,improve=0.01, trace=TRUE, plot=TRUE)
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+
+
+
+#################################################################
+#XGBoost
+xg.train <- train2
+xg.test <- test2
+
+train_labels <- xg.train$action_taken_name
+test_labels <- xg.test$action_taken_name
+
+
+#convert to xgb.DMatrix
+xg.train$action_taken_name <- NULL
+xg.train.m <- data.matrix(xg.train)
+
+#for predictions
+xg.test$action_taken_name <- NULL
+xg.test.m <- data.matrix(xg.test)
+
+
+xg_boost_model <- xgboost(data = resamp.train.m, label = train_labels, missing = NULL, max.depth = 2, eta = 0.95, nround = 1000, objective = "binary:logistic", eval_metric = "logloss")
+
+
+xgpred <- predict(xg_boost_model, xg.test.m, type = "response")
+
+
+xgbpred <- ifelse (xgpred > 0.5,1,0) #use 0.5 for cutoff until find optimal point from ROCR curve
+
+xgmat <- confusionMatrix(xgbpred, test_labels)
+xgmat
+
+
+#####find optimal cutoff with ROC curve
+ROCRpred0 <- prediction(as.numeric(xgpred),as.numeric(test_labels))
+ss <- performance(ROCRpred0, "sens", "spec")
+plot(ss)
+
+###OPTIMAL CUTOFF: YIELDS THE HIGHEST SENSITIVIY PLUS SPECIFICITY###
+
+##predict the positive outcome when the predicted probability exceeds 0.7933188 and
+##predict the negative outcome when the predicted probability does not exceed 0.7933188
+ss@alpha.values[[1]][which.max(ss@x.values[[1]]+ss@y.values[[1]])]
+#[1] 0.7933188
+
+##yield a sensitivity plus specificity value of 1.655833
+max(ss@x.values[[1]]+ss@y.values[[1]])
+#[1] 1.659991
+
+##OPTIMAL CUTOFF USING ROCR CURVE
+xgbpred <- ifelse (xgpred > 0.7933188,1,0) 
+xgmat <- confusionMatrix(xgbpred, test_labels)
+xgmat
+
+
+
+roc_test <- roc(test_labels, xgbpred, algorithm = 2)
+plot(roc_test ) 
+auc(roc_test )
+
+
+
+# 
+# #downsample to account for imbalance of data
+# resamp.train <- train2
+# resamp.test <- test2
+# 
+# 
+# var_for_resamp <- as.factor(resamp.train$action_taken_name)
+# resamp <- downSample(resamp.train, var_for_resamp, list = F)
+# 
+# resamp_label <- resamp$action_taken_name
+# resamp$action_taken_name <- NULL
+# 
+# resamp_ts <- resamp.test$action_taken_name
+# resamp.test$action_taken_name <- NULL
+# 
+# resamp.train.m <- data.matrix(resamp)
+# resamp.test.m <- data.matrix(resamp.test)
+# 
+# 
+# resamp_boost_model <- xgboost(data = resamp.train.m, label = resamp_label, missing = NULL, max.depth = 2, eta = 0.95, nround = 500, objective = "binary:logistic", eval_metric = "logloss")
+# 
+# 
+# xgpred <- predict(resamp_boost_model, resamp.test.m, type = "response")
+# 
+# 
+# xgbpred <- ifelse (xgpred > 0.5,1,0) #use 0.5 for cutoff until find optimal point from ROCR curve
+# 
+# xgmat <- confusionMatrix(xgbpred, test_labels)
+# xgmat
