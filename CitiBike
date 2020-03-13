@@ -1,0 +1,450 @@
+library(dplyr)
+library(xgboost)
+library(tidyverse)
+library(caret)
+library(geosphere)
+library(ggplot2)
+library(ggthemes)
+library(measurements)
+library(lubridate)
+library(Matrix)
+library(BBmisc)
+library(Metrics)
+library(rsq)
+library(SparseM)
+library(data.table)
+library(MatrixModels)
+
+##**TRIP DURATION IS IN SECONDS
+
+#CHANGE NAMES TO BE ABLE TO RBIND ALL CITI BIKE DATA FROM 2017
+change_names_meta <- function (csv) {
+  colnames(csv)[colnames(csv)=="Trip Duration"] <- "tripduration"
+  colnames(csv)[colnames(csv)=="Start Time"] <- "starttime"
+  colnames(csv)[colnames(csv)=="Stop Time"] <- "stoptime"
+  colnames(csv)[colnames(csv)=="Start Station ID"] <- "start station id"
+  colnames(csv)[colnames(csv)=="Start Station Name"] <- "start station name"
+  colnames(csv)[colnames(csv)=="Start Station Latitude"] <- "start station latitude"
+  colnames(csv)[colnames(csv)=="Start Station Longitude"] <- "start station longitude"
+  colnames(csv)[colnames(csv)=="End Station Latitude"] <- "end station latitude"
+  colnames(csv)[colnames(csv)=="End Station Longitude"] <- "end station longitude"
+  colnames(csv)[colnames(csv)=="End Station ID"] <- "end station id"
+  colnames(csv)[colnames(csv)=="End Station Name"] <- "end station name"
+  colnames(csv)[colnames(csv)=="Bike ID"] <- "bikeid"
+  colnames(csv)[colnames(csv)=="User Type"] <- "usertype"
+  colnames(csv)[colnames(csv)=="Birth Year"] <- "birth year"
+  colnames(csv)[colnames(csv)=="Gender"] <- "gender"
+  
+  return(csv)
+  
+}
+
+
+X201701_citibike_tripdata_csv1 <- change_names_meta(X201701_citibike_tripdata_csv)
+X201702_citibike_tripdata_csv1 <-change_names_meta(X201702_citibike_tripdata_csv)
+X201703_citibike_tripdata_csv1 <- change_names_meta(X201703_citibike_tripdata_csv)
+
+#RBIND CITI BIKE DATA FOR EACH MONTH FOR 2017
+all_data <- rbind(X201701_citibike_tripdata_csv1,
+                  X201702_citibike_tripdata_csv1,
+                  X201703_citibike_tripdata_csv1,
+                  X201704_citibike_tripdata_csv,
+                  X201705_citibike_tripdata_csv,
+                  X201706_citibike_tripdata_csv,
+                  X201707_citibike_tripdata_csv,
+                  X201708_citibike_tripdata_csv,
+                  X201709_citibike_tripdata_csv,
+                  X201710_citibike_tripdata_csv,
+                  X201711_citibike_tripdata_csv,
+                  X201712_citibike_tripdata_csv)
+
+no_dups <- distinct(all_data)
+use_data  <- no_dups
+
+
+##CAN ONLY TAKE A BIKE OUT FOR 30 MINS AND 45 MINS RESPECTIVELY - FILTER OUT EVERYTHING OVER 2.5 HOURS AND EVERYTHING
+#LESS THAN 90 SECONDS WHERE START AND END STATION ARE THE SAME
+#2.5 hrs in seconds - 
+
+hours_allowed <- filter(use_data, use_data$tripduration < 86400)
+#IF A BIKE IS NOT ReTURNED FOR 24 HOURS - PERSON IS CHARGED $1200 - FULL AMOUNT OF BIKE
+
+#FILTER OUT ROWS IF START AND END STATION ARE THE SAME AND TRIP DURATION IS LESS THAN 1.5 MINS
+all_data_clean <- hours_allowed[!((hours_allowed$`start station id` == hours_allowed$`end station id`) & hours_allowed$tripduration < 90),]
+
+#a - Top 5 stations showing number of starts - bar plot
+num_starts <- data.frame(table(all_data_clean$`start station name`))
+num_starts <- num_starts[with(num_starts, order(-Freq)), ]
+top_5_starts <- num_starts[1:5,]
+colnames(top_5_starts)[colnames(top_5_starts)=="Var1"] <- "Station_Name"
+colnames(top_5_starts)[colnames(top_5_starts)=="Freq"] <- "Frequency"
+
+
+p <-ggplot(top_5_starts, aes(Station_Name, Frequency, fill = Station_Name))
+p +geom_bar(stat = "identity") + 
+  geom_text(aes(label=Frequency), vjust=-0.3, size=3.5) +
+  scale_fill_brewer(palette="Dark2")
+  # scale_fill_manual("legend", values = c("Pershing Square North" = "blue", "E 17 St & Broadway" = "teal", "Broadway & E 22 St" = "aqua",
+  #                                        "W 21 St & 6 Ave" = "cyan", "West St & Chambers St" = "skyblue"))
+  # 
+
+
+
+#b - box plot - Trip Duration by user type
+
+##NOTE - REMOVED NA'S - NA IS NOT A LEVEL
+trips_user_types <- all_data_clean %>% group_by(usertype) %>% select(tripduration) %>% na.omit()
+trips_user_types$tripduration <- trips_user_types$tripduration/60
+
+boxplot(tripduration~usertype,data=trips_user_types, main="Trip Duration by User Type",
+        xlab="User Type", ylab="Trip Duration") 
+
+#BOXPPLOTS PER USER TYPE
+user_types_sub <- trips_user_types %>% filter(usertype == "Subscriber" & tripduration <= 45)
+  
+user_types_cust <- trips_user_types %>% filter(usertype == "Customer" & tripduration <= 30)
+
+boxplot(tripduration~usertype,data=user_types_sub, main="Trip Duration - Subscribers",
+        xlab="User Type", ylab="Trip Duration") 
+
+boxplot(tripduration~usertype,data=user_types_cust, main="Trip Duration - Customers",
+        xlab="User Type", ylab="Trip Duration") 
+
+##CALCULATE MEDIAN AND MEAN PER USER TYPE FOR SLIDES
+mean(user_types_sub$tripduration)
+mean(user_types_cust$tripduration)
+median(user_types_sub$tripduration)
+median(user_types_cust$tripduration)
+
+
+
+#INC SUMMARY STATS - HOW MANY OF EACH USER TYPE - NOT EXCLUDED NA'S ABOUT (15,000 OF THEM)
+summary(trips_user_types)
+# usertype          tripduration     
+# Length:16320360    Min.   :   1.017  
+# Class :character   1st Qu.:   6.217  
+# Mode  :character   Median :  10.350  
+# Mean   :  14.374  
+# 3rd Qu.:  17.917  
+# Max.   :1439.317  
+
+#** NOTE - took out NA's from user types
+
+#c - Most popular trips
+most_pop_trips <- all_data_clean %>% group_by(`start station name`, `end station name`) %>% summarise(count = n())
+most_pop_trips$Stations <- paste(most_pop_trips$`start station name`, most_pop_trips$`end station name`, sep=" & ")
+most_pop_trips <- as.data.frame(most_pop_trips)
+most_pop_trips <- most_pop_trips[with(most_pop_trips, order(-count)), ]
+pop_10_trips <- most_pop_trips[1:10,]
+pop_10_trips$`end station name` <- NULL
+pop_10_trips$`start station name` <- NULL
+
+theme_set(theme_bw())
+
+# Draw plot
+
+ggplot(pop_10_trips, aes(x=Stations, y=count)) + 
+  geom_point(size=3, color = "orange") + 
+  geom_segment(aes(x=Stations, 
+                   xend=Stations, 
+                   y=0, 
+                   yend=count),
+               color = "blue") + 
+  labs(title="Lollipop Chart", 
+       subtitle="Most Popular Trips") +
+  coord_flip() +
+  scale_fill_brewer(palette="Pastel2")
+  
+
+
+
+#d - Rider performance by Gender and Age based on avg trip distance and median speed
+all_data_clean$distance<-distHaversine(all_data_clean[,6:7], all_data_clean[,10:11])
+all_data_clean$distance <- conv_unit(all_data_clean$distance, "m", "mi")
+
+viz <- all_data_clean
+viz <- filter(viz, viz$tripduration != 0)
+viz <- filter(viz, viz$`birth year` > 1917)
+
+colnames(viz)[colnames(viz)=="birth year"] <- "birth_year"
+
+viz$decade <- ifelse(viz$birth_year >= 1918 & viz$birth_year < 1920, "1918-1920", viz$birth_year)
+viz$decade <- ifelse(viz$birth_year >= 1920 & viz$birth_year < 1930, "1920-1930", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 1930 & viz$birth_year < 1940, "1930-1940", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 1940 & viz$birth_year < 1950, "1940-1950", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 1950 & viz$birth_year < 1960, "1950-1960", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 1960 & viz$birth_year < 1970, "1960-1970", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 1970 & viz$birth_year < 1980, "1970-1980", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 1980 & viz$birth_year < 1990, "1980-1990", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 1990 & viz$birth_year < 2000, "1990-2000", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 2000 & viz$birth_year < 2010, "2000-2010", viz$decade)
+viz$decade <- ifelse(viz$birth_year >= 2010 & viz$birth_year < 2018, "2010-2018", viz$decade)
+
+viz$decade <- as.factor(viz$decade)
+
+viz1 <- viz
+
+viz1$tripduration <- viz1$tripduration/3600
+
+
+rider_performance <- viz1 %>% group_by(decade, gender) %>% summarise(avg_dist = mean(distance),
+                                                                               med_speed = median(distance/tripduration))
+
+rider_performance <- rider_performance[!grepl("NULL",rider_performance$decade),]
+
+rider_performance$gender <- ifelse(rider_performance$gender == 0, "Unknown", rider_performance$gender)
+rider_performance$gender <- ifelse(rider_performance$gender == 1, "Male", rider_performance$gender)
+rider_performance$gender <- ifelse(rider_performance$gender == 2, "Female", rider_performance$gender)
+
+#rider_performance$gender <- as.character(rider_performance$gender)
+rider_performance$gender <- as.factor(rider_performance$gender)
+
+theme_set(theme_bw())  
+g <- ggplot(rider_performance, aes(avg_dist, med_speed)) + 
+  labs(title="Rider Performance")
+
+g + geom_jitter(aes(col=gender, size = decade)) + 
+  geom_smooth(aes(col=gender), method="lm", se=F) +
+  xlab("Average Distance (miles)") +
+  ylab("Median Speed (miles/hour)")
+
+
+#e - Busiest bike in NYC
+bike_viz <- all_data_clean
+
+#in minutes
+bike_viz$tripduration <- bike_viz$tripduration/60
+#bike_viz <- filter(bike_viz, bike_viz$tripduration < 1440)
+#^was just to check
+
+busiest_bike <- bike_viz %>% group_by(bikeid) %>% summarise(count = n(),
+                                                            trip_length = sum(tripduration))
+
+top_10_bikes <- busiest_bike[with(busiest_bike, order(-count)), ]
+top_10_bikes <- top_10_bikes[1:10,]
+
+
+gg <- ggplot(top_10_bikes, aes(x=as.factor(bikeid), y=count)) +
+  geom_point(aes(size = trip_length)) +
+  scale_x_discrete(breaks=c(25738, 25275, 27161, 26565, 27111, 25453, 27018,
+                              27117, 26928, 26931)) +
+  #scale_x_continuous(labels=top_10_bikes$bikeid) +
+  #xlim(c(25000, 28000)) +
+  ylim(c(2000, 3000)) +
+  labs(subtitle="Top 10 Most Popular Bikes",
+       y="Number of Times Used",
+       x="Bike ID",
+       title="Scatterplot",
+       size = "Trip Length (minutes)")
+
+plot(gg)
+
+
+
+
+###################################################################################
+#MACHINE LEARNING MODEL
+
+model_data <- all_data_clean
+
+model_data$starttime <- cut(model_data$starttime, "day", labels = NULL)
+model_data$stoptime <- cut(model_data$stoptime, "day", labels = NULL)
+
+colnames(model_data)[colnames(model_data)=="birth year"] <- "birth_year"
+
+
+model_data$`start station name` <- NULL
+model_data$`end station name` <- NULL
+
+
+#ADDING WEATHER DATA FROM NATIONAL CLIMACTIC DATA CENTER - PICKING RELEVANT COLUMNS
+weather <- X1323969
+colnames(weather)[colnames(weather)=="DATE"] <- "starttime"
+
+model_data$starttime <- as.Date(model_data$starttime)
+with_weather <- left_join(model_data, weather, by = "starttime")
+
+
+with_weather$STATION <- NULL
+with_weather$NAME <- NULL
+with_weather$AWND <- NULL
+with_weather$PGTM <- NULL
+with_weather$WDF2 <- NULL
+with_weather$WDF5 <- NULL
+with_weather$WT01 <- NULL
+with_weather$WT02 <- NULL
+with_weather$WT03 <- NULL
+with_weather$WT04 <- NULL
+with_weather$WT06 <- NULL
+with_weather$WT08 <- NULL
+with_weather$WT08 <- NULL
+with_weather$WSF2<- NULL
+with_weather$WSF5 <- NULL
+with_weather$LATITUDE <- NULL
+with_weather$LONGITUDE <- NULL
+with_weather$ELEVATION <- NULL
+
+#with_weather$stoptime <- NULL
+
+#CALCULATING TRIP DISTANCE
+with_weather$distance <- distHaversine(model_data[,5:6], model_data[,8:9])
+with_weather$distance <- conv_unit(with_weather$distance, "m", "mi")
+#distance is in meters
+
+#CALCULATING WHETHER DATE IS A WEEKEND OR WEEKDAY AND ADDIND "WEEKEND" COLUMN
+with_weather$starttime <- as.POSIXct(with_weather$starttime)
+with_weather$stoptime <- as.POSIXct(with_weather$stoptime)
+with_weather$weekend <- weekdays(with_weather$starttime)
+with_weather$weekend <- ifelse(with_weather$weekend == "Saturday" | with_weather$weekend == "Sunday", 1, 0)
+
+
+final_set <- with_weather
+final_set$stoptime <- NULL
+final_set$`start station latitude` <- NULL
+final_set$`start station longitude` <- NULL
+final_set$`end station longitude` <- NULL
+final_set$`end station latitude` <- NULL
+
+final_set$month <- month(final_set$starttime)
+final_set$starttime <- NULL
+
+colnames(final_set)[colnames(final_set)=="start station id"] <- "start_station_id"
+colnames(final_set)[colnames(final_set)=="end station id"] <- "end_station_id"
+
+final_set2 <- na.omit(final_set)
+
+
+#2 SD OF THE MEAN - ELIMINATING OUTIERS
+find_sd <- 2*sd(final_set2$tripduration)
+find_mean <- mean(final_set2$tripduration)
+
+cutoff <- find_mean + find_sd 
+cutoff
+#3615.041
+
+#USE CUTOFF TO REMOVE OUTLIERS
+minus_noise <- filter(final_set2, final_set2$tripduration <= 3615.041)
+
+##DUMMIFY ID VARIABLES
+#users <- model.matrix(~usertype-1,minus_noise)
+users_sparse <- sparse.model.matrix(~usertype-1,minus_noise)
+
+minus_noise$start_station_id <- as.factor(minus_noise$start_station_id)
+start_stations <- sparse.model.matrix(~start_station_id-1,minus_noise)
+
+minus_noise$end_station_id <- as.factor(minus_noise$end_station_id)
+end_stations <- sparse.model.matrix(~end_station_id-1,minus_noise)
+
+minus_noise$gender <- as.factor(minus_noise$gender)
+gender <- sparse.model.matrix(~gender-1,minus_noise)
+
+#decided which bike you use probably does not have much impact on trip duration
+# minus_noise$bikeid <- as.factor(minus_noise$bikeid)
+# bikes <- sparse.model.matrix(~bikeid-1,minus_noise)
+
+minus_noise$month <- as.factor(minus_noise$month)
+months_yr <- sparse.model.matrix(~month-1,minus_noise)
+
+#CBIND DUMMIFIED CATEGORICAL VARIABLES
+total_categorical <- cbind(users_sparse, start_stations, end_stations, gender, months_yr)
+total_categorical_train <- total_categorical[1:12052078,]
+total_categorical_test <- total_categorical[12052079:16069437,]
+
+#NORMALIZE NUMBER VARIABLES
+normalized_vars <- minus_noise
+normalized_vars$usertype <- NULL
+normalized_vars$start_station_id <- NULL
+normalized_vars$end_station_id <- NULL
+normalized_vars$gender <- NULL
+normalized_vars$bikeid <- NULL
+normalized_vars$month <- NULL
+
+
+normalized_vars$birth_year <- as.numeric(normalized_vars$birth_year)
+
+#NORMALIZE VARIABLES
+normalized_vars$distance <- normalize(normalized_vars$distance, method = "range", range = c(0, 1))
+normalized_vars$birth_year <- normalize(normalized_vars$birth_year, method = "range", range = c(0, 1))
+normalized_vars$tripduration <- normalize(normalized_vars$tripduration, method = "range", range = c(0, 1))
+
+
+#SET RESPONSE VARIABLE (TRIP DURATION) AS LABELS FOR MODEL
+labels <- data.frame(normalized_vars$tripduration)
+train_labels <- labels[1:12052078,]
+train_labels2 <- as.matrix(train_labels)
+test_labels <- labels[12052079:16069437,]
+test_labels2 <- as.matrix(test_labels)
+
+
+#REMOVE COLUMNS NOT BEING USED
+normalized_vars2 <- normalized_vars
+normalized_vars2$birth_year[is.na(normalized_vars2$birth_year)] <- 0
+normalized_vars2$tripduration <- NULL
+#normalized_vars2$multi_day <- NULL
+
+#normalized_vars2 <- normalized_vars2[complete.cases(normalized_vars2), ]
+
+normalized_vars2<-sapply(data.frame(normalized_vars2),as.numeric)
+
+normalized_vars_split <- Matrix(normalized_vars2, sparse = TRUE)
+normalized_train <- normalized_vars_split[1:12052078,]
+normalized_test <- normalized_vars_split[12052079:16069437,]
+
+#COMBINE INTO TOTAL TEST AND TRAIN SETS
+total_vars_train <- cbind(total_categorical_train, normalized_train)
+total_vars_test <- cbind(total_categorical_test, normalized_test)
+
+
+#TRAIN XGBOOST MODEL
+bike_boost_model <- xgboost(data = total_vars_train, label = train_labels2, missing = NULL, max.depth = 12, eta = 0.6, nround = 2500, objective = "reg:linear", eval_metric = "rmse")
+
+#MAKE PREDICTIONS
+xgpred <- predict(bike_boost_model, total_vars_test)
+
+#cv <- xgb.cv(bike_boost_model)
+
+#bike_boost_model <- xgboost(data = total_vars_train, label = train_labels2, missing = NULL, max.depth = 8, eta = 0.2, gamma = 0.03, nthread = 2, nround = 400, objective = "reg:linear", eval_metric = "rmse")
+
+#RMSE - #0.09324281
+residuals = test_labels2 - xgpred
+RMSE = sqrt(mean(residuals^2))
+test_mean = mean(test_labels2)
+# Calculate total sum of squares
+tss =  sum((test_labels2 - test_mean)^2 )
+# Calculate residual sum of squares
+rss =  sum(residuals^2)
+# Calculate R-squared
+rsq  =  1 - (rss/tss)
+rsq
+#0.6297075
+
+
+imp <- xgb.importance(model = bike_boost_model)
+
+########################################################
+
+###########################################################################
+#TRIED GLM NET - PERFOMANCE NOT AS GOOD AS XGBOOST
+# gml_try <- total_vars_train[1:100000,]
+# gml_try_lab <- train_labels2[1:100000,]
+# 
+# glm_Pred_set <- total_vars_test[1:100000,]
+# 
+# fit <- glmnet(gml_try, gml_try_lab, family="gaussian")
+# pred <- predict(fit, glm_Pred_set, type="class")
+# 
+# calc <- test_labels2[1:100000,]
+# 
+# residuals = calc - pred
+# RMSE = sqrt(mean(residuals^2))
+# test_mean = mean(test_labels2)
+# # Calculate total sum of squares
+# tss =  sum((test_labels2 - test_mean)^2 )
+# # Calculate residual sum of squares
+# rss =  sum(residuals^2)
+# # Calculate R-squared
+# rsq  =  1 - (rss/tss)
+# rsq
+# 
+# rmse1 = rmse(pred, calc)
+# rmse1
